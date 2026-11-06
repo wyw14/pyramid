@@ -760,6 +760,42 @@ Each value in the tuple will be URL-quoted and joined by slashes in this case:
 
     /a/b/c/Qu%C3%A9bec/biz
 
+.. _checking_route_params:
+
+Checking Route Parameters
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`pyramid.request.Request.route_url` raises a :exc:`KeyError` when a
+required dynamic segment value is missing, and any extra values you supply
+are silently ignored.  To inspect these mismatches *without* generating a
+URL, use the :meth:`pyramid.request.Request.check_route_params` method.
+Given a route name and a mapping (or a sequence of ``(name, value)`` pairs,
+such as the ``items()`` of a :class:`webob.multidict.MultiDict`), it
+returns a ``(missing, unused)`` pair of tuples:
+
+- ``missing`` names the required dynamic segments for which no value was
+  supplied, including a trailing ``*remainder`` wildcard segment when the
+  pattern has one, ordered by their declaration in the route pattern;
+- ``unused`` names the supplied values which do not correspond to any
+  dynamic segment, ordered by their first occurrence in the input.
+
+For example, for a route configured as ``{a}/{b}/*traverse``:
+
+.. code-block:: python
+    :linenos:
+
+    request.check_route_params('foo', {'a': '1'})
+    # (('b', 'traverse'), ())
+
+    request.check_route_params(
+        'foo', {'a': '1', 'b': '2', 'traverse': ('x',), 'extra': 'z'}
+    )
+    # ((), ('extra',))
+
+The check is purely static: it does not generate a URL, it does not call
+the route's :term:`pregenerator`, and it does not execute any view code.
+Passing an unknown route name raises a :exc:`KeyError`.
+
 .. index::
    single: static routes
 

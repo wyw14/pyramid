@@ -42,6 +42,14 @@ class TestRoute(unittest.TestCase):
         self.assertIsInstance(route.generate, types.FunctionType)
         self.assertIsInstance(route.match, types.FunctionType)
 
+    def test_names(self):
+        route = self._makeOne('name', '/foo/:baz/biz/:buz/bar*traverse')
+        self.assertEqual(route.names, ('baz', 'buz', 'traverse'))
+
+    def test_names_without_dynamic_segments(self):
+        route = self._makeOne('name', '/foo/bar')
+        self.assertEqual(route.names, ())
+
     def test_match(self):
         route = self._makeOne('name', ':path')
         self.assertEqual(route.match('/whatever'), {'path': 'whatever'})
@@ -485,6 +493,58 @@ class TestCompileRoute(unittest.TestCase):
         self.assertEqual(result, '/abc/None')
         # should be a native string
         self.assertEqual(type(result), str)
+
+
+class TestRouteArgnames(unittest.TestCase):
+    def _callFUT(self, pattern):
+        from pyramid.urldispatch import _route_argnames
+
+        return _route_argnames(pattern)
+
+    def test_no_dynamic_segments(self):
+        self.assertEqual(self._callFUT('/foo/bar'), ())
+
+    def test_newstyle_segments_in_declaration_order(self):
+        self.assertEqual(
+            self._callFUT('/{foo}/{bar}/{baz}'), ('foo', 'bar', 'baz')
+        )
+
+    def test_oldstyle_segments(self):
+        self.assertEqual(
+            self._callFUT('/foo/:baz/biz/:buz/bar'), ('baz', 'buz')
+        )
+
+    def test_missing_leading_slash(self):
+        self.assertEqual(self._callFUT('{foo}/{bar}'), ('foo', 'bar'))
+
+    def test_custom_regex_strips_regex(self):
+        self.assertEqual(
+            self._callFUT('/{foo}/{num:[0-9]+}/{bar}'),
+            ('foo', 'num', 'bar'),
+        )
+
+    def test_custom_regex_with_colon(self):
+        self.assertEqual(
+            self._callFUT('/{buz:(?:[^/\\.]+)}.{bar}'), ('buz', 'bar')
+        )
+
+    def test_trailing_wildcard_is_last(self):
+        self.assertEqual(
+            self._callFUT('/{foo}/{bar}/*traverse'),
+            ('foo', 'bar', 'traverse'),
+        )
+
+    def test_wildcard_without_slash(self):
+        self.assertEqual(self._callFUT('/foo*traverse'), ('traverse',))
+
+    def test_bracket_style_remainder(self):
+        self.assertEqual(
+            self._callFUT('/foo/{baz}/bar{remainder:.*}'),
+            ('baz', 'remainder'),
+        )
+
+    def test_highorder_bytestring_raises(self):
+        self.assertRaises(ValueError, self._callFUT, b'/La Pe/\xc3\xb1a')
 
 
 class TestCompileRouteFunctional(unittest.TestCase):

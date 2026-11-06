@@ -13,6 +13,8 @@
 
   .. autofunction:: route_path
 
+  .. autofunction:: check_route_params
+
   .. autofunction:: current_route_path
 
   .. autofunction:: static_url

@@ -948,6 +948,11 @@ class IRoute(Interface):
 
     name = Attribute('The route name')
     pattern = Attribute('The route pattern')
+    names = Attribute(
+        'A tuple of the names of the dynamic segment markers (including a '
+        'trailing ``*remainder`` wildcard name, if any) found in the route '
+        'pattern, in pattern declaration order'
+    )
     factory = Attribute(
         'The :term:`root factory` used by the :app:`Pyramid` router '
         'when this route matches (or ``None``)'

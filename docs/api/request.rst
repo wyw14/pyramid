@@ -9,12 +9,12 @@
    :members:
    :inherited-members:
    :exclude-members: add_response_callback, add_finished_callback,
-                     route_url, route_path, current_route_url,
-                     current_route_path, static_url, static_path,
-                     model_url, resource_url, resource_path, set_property, 
-                     effective_principals, authenticated_userid,
-                     unauthenticated_userid, has_permission,
-                     invoke_exception_view, localizer, response, session
+                    route_url, route_path, check_route_params, current_route_url,
+                    current_route_path, static_url, static_path,
+                    model_url, resource_url, resource_path, set_property, 
+                    effective_principals, authenticated_userid,
+                    unauthenticated_userid, has_permission,
+                    invoke_exception_view, localizer, response, session
 
    .. attribute:: context
 
@@ -271,6 +271,8 @@
    .. automethod:: route_url
 
    .. automethod:: route_path
+
+   .. automethod:: check_route_params
 
    .. automethod:: current_route_url
 

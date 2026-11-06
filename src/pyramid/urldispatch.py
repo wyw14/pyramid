@@ -17,6 +17,9 @@ class Route:
         self.pattern = pattern
         self.path = pattern  # indefinite b/w compat, not in interface
         self.match, self.generate = _compile_route(pattern)
+        # names of the dynamic segments (incl. a trailing wildcard)
+        # in pattern declaration order
+        self.names = _route_argnames(pattern)
         self.name = name
         self.factory = factory
         self.predicates = predicates
@@ -108,7 +111,13 @@ def update_pattern(matchobj):
     return '{%s}' % name[1:]
 
 
-def _compile_route(route):
+def _normalize_pattern(route):
+    # Normalize a route pattern the same way ``_compile_route`` does:
+    # decode bytestrings, translate old-style ``:name`` markers, prepend a
+    # missing leading slash, and split off any trailing ``*remainder``
+    # wildcard.  Returns a 2-tuple of ``(pattern, remainder)`` where
+    # ``remainder`` is the wildcard name or ``None``.
+    #
     # This function really wants to consume Unicode patterns natively, but if
     # someone passes us a bytestring, we allow it by converting it to Unicode
     # using the ASCII decoding.  We decode it using ASCII because we don't
@@ -133,6 +142,33 @@ def _compile_route(route):
     remainder = None
     if star_at_end.search(route):
         route, remainder = route.rsplit('*', 1)
+
+    return route, remainder
+
+
+def _route_argnames(route):
+    # Return the names of the dynamic segments declared by a route pattern
+    # as a tuple in pattern declaration order.  A trailing wildcard
+    # (``*remainder``) is the final element, when present.  No URL is
+    # generated and no value is substituted; this merely inspects the
+    # pattern.
+    route, remainder = _normalize_pattern(route)
+    names = []
+    for part in route_re.split(route):
+        if route_re.fullmatch(part):
+            name = part[1:-1]
+            if ':' in name:
+                # the regex may contain colons as well, so we must
+                # strictly split name into two parts
+                name = name.split(':', 1)[0]
+            names.append(name)
+    if remainder:
+        names.append(remainder)
+    return tuple(names)
+
+
+def _compile_route(route):
+    route, remainder = _normalize_pattern(route)
 
     pat = route_re.split(route)
 

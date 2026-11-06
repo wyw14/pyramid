@@ -644,6 +644,135 @@ class TestURLMethodsMixin(unittest.TestCase):
         result = request.route_url('flub', 'extra1', 'extra2')
         self.assertEqual(result, 'http://localhost/1/2/3/extra1/extra2')
 
+    def test_check_route_params_all_missing(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('foo', 'bar'))
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        missing, unused = request.check_route_params('flub', {})
+        self.assertEqual(missing, ('foo', 'bar'))
+        self.assertEqual(unused, ())
+
+    def test_check_route_params_missing_order_follows_declaration(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('baz', 'foo', 'bar'))
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        missing, unused = request.check_route_params(
+            'flub', {'bar': '2', 'extra': 'x'}
+        )
+        self.assertEqual(missing, ('baz', 'foo'))
+        self.assertEqual(unused, ('extra',))
+
+    def test_check_route_params_unused_order_follows_input(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('foo',))
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        missing, unused = request.check_route_params(
+            'flub', {'zeta': 1, 'foo': 2, 'alpha': 3, 'mid': 4}
+        )
+        self.assertEqual(missing, ())
+        self.assertEqual(unused, ('zeta', 'alpha', 'mid'))
+
+    def test_check_route_params_wildcard_is_required(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('foo', 'bar', 'traverse'))
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        missing, unused = request.check_route_params(
+            'flub', {'foo': '1', 'bar': '2'}
+        )
+        self.assertEqual(missing, ('traverse',))
+
+    def test_check_route_params_wildcard_satisfied(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('foo', 'bar', 'traverse'))
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        missing, unused = request.check_route_params(
+            'flub',
+            {'foo': '1', 'bar': '2', 'traverse': ('a', 'b')},
+        )
+        self.assertEqual(missing, ())
+        self.assertEqual(unused, ())
+
+    def test_check_route_params_pair_sequence_with_duplicate_input(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('foo', 'bar'))
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        # a MultiDict-style sequence of pairs may repeat names
+        missing, unused = request.check_route_params(
+            'flub',
+            [('foo', '1'), ('extra', '2'), ('foo', '3'), ('extra', '4')],
+        )
+        # duplicated 'foo' is still supplied (not missing); 'bar' is missing
+        self.assertEqual(missing, ('bar',))
+        # 'extra' listed only once, at its first input position
+        self.assertEqual(unused, ('extra',))
+
+    def test_check_route_params_returns_tuples(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('foo',))
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        result = request.check_route_params('flub', {'foo': '1'})
+        self.assertEqual(result, ((), ()))
+        self.assertIsInstance(result[0], tuple)
+        self.assertIsInstance(result[1], tuple)
+
+    def test_check_route_params_unknown_route(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        mapper = DummyRoutesMapper(route=None)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        self.assertRaises(
+            KeyError, request.check_route_params, 'nope', {'foo': '1'}
+        )
+
+    def test_check_route_params_does_not_generate_or_invoke_pregenerator(self):
+        from pyramid.interfaces import IRoutesMapper
+
+        request = self._makeOne()
+        route = DummyRoute(names=('foo',))
+
+        def pregenerator(request, elements, kw):
+            raise AssertionError('pregenerator must not be called')
+
+        route.pregenerator = pregenerator
+        mapper = DummyRoutesMapper(route=route)
+        request.registry.registerUtility(mapper, IRoutesMapper)
+        result = request.check_route_params('flub', {'foo': '1'})
+        self.assertEqual(result, ((), ()))
+        # DummyRoute.generate records kw when called; it must never run
+        self.assertFalse(hasattr(route, 'kw'))
+
+    def test_check_route_params_integration(self):
+        self.config.add_route('flub', '/foo/{foo}/{bar}/*traverse')
+        request = self._makeOne()
+        request.registry = self.config.registry
+        missing, unused = request.check_route_params(
+            'flub', {'traverse': ('a',), 'bogus': 'x'}
+        )
+        self.assertEqual(missing, ('foo', 'bar'))
+        self.assertEqual(unused, ('bogus',))
+
     def test_current_route_url_current_request_has_no_route(self):
         request = self._makeOne()
         self.assertRaises(ValueError, request.current_route_url)
@@ -1128,6 +1257,30 @@ class Test_route_path(unittest.TestCase):
         self.assertEqual(request.kw, {'_app_url': ''})
 
 
+class Test_check_route_params(unittest.TestCase):
+    def _callFUT(self, route_name, request, params):
+        from pyramid.url import check_route_params
+
+        return check_route_params(route_name, request, params)
+
+    def _makeRequest(self):
+        class Request:
+            def check_route_params(self, route_name, params):
+                self.route_name = route_name
+                self.params = params
+                return ((), ())
+
+        return Request()
+
+    def test_it(self):
+        request = self._makeRequest()
+        params = {'foo': 'bar'}
+        result = self._callFUT('abc', request, params)
+        self.assertEqual(result, ((), ()))
+        self.assertEqual(request.route_name, 'abc')
+        self.assertIs(request.params, params)
+
+
 class Test_resource_url(unittest.TestCase):
     def _callFUT(self, resource, request, *elements, **kw):
         from pyramid.url import resource_url
@@ -1434,9 +1587,11 @@ class DummyRoutesMapper:
 class DummyRoute:
     pregenerator = None
     name = 'route'
+    names = ()
 
-    def __init__(self, result='/1/2/3'):
+    def __init__(self, result='/1/2/3', names=()):
         self.result = result
+        self.names = tuple(names)
 
     def generate(self, kw):
         self.kw = kw

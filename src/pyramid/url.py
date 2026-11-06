@@ -56,6 +56,43 @@ def parse_url_overrides(request, kw):
     return app_url, qs, frag
 
 
+def _check_route_params(required_names, params):
+    # Static comparison of names required by a route pattern against the
+    # names supplied by a caller.  Does no substitution and no I/O.
+    #
+    # ``required_names`` is the tuple of dynamic segment names from the
+    # route pattern in declaration order; ``params`` is a mapping or a
+    # sequence of ``(name, value)`` two-tuples (the latter may carry
+    # duplicate names, e.g. a webob MultiDict).
+    #
+    # Returns ``(missing, unused)`` tuples.  ``missing`` keeps route
+    # declaration order; ``unused`` keeps the order of the first
+    # occurrence in ``params``.
+    required = []
+    required_set = set()
+    for name in required_names:
+        if name not in required_set:
+            required_set.add(name)
+            required.append(name)
+
+    if hasattr(params, 'items'):
+        supplied = [name for name, _value in params.items()]
+    else:
+        supplied = [name for name, _value in params]
+
+    supplied_set = set(supplied)
+    missing = tuple(name for name in required if name not in supplied_set)
+
+    unused = []
+    unused_set = set()
+    for name in supplied:
+        if name not in required_set and name not in unused_set:
+            unused_set.add(name)
+            unused.append(name)
+
+    return missing, tuple(unused)
+
+
 class URLMethodsMixin:
     """Request methods mixin for BaseRequest having to do with URL
     generation"""
@@ -298,6 +335,73 @@ class URLMethodsMixin:
         """
         kw['_app_url'] = self.script_name
         return self.route_url(route_name, *elements, **kw)
+
+    def check_route_params(self, route_name, params):
+        """Check whether ``params`` can satisfy the dynamic segments of a
+        named :app:`Pyramid` :term:`route configuration` *without*
+        generating a URL.
+
+        ``route_name`` is the name of the registered route.  ``params`` is
+        either a mapping of replacement names to values (such as a
+        dictionary) or a sequence of ``(name, value)`` two-tuples.  The
+        latter form may contain duplicate names, as produced by the
+        ``items()`` of a :class:`webob.multidict.MultiDict` such as
+        ``request.GET``.
+
+        Returns a two-tuple ``(missing, unused)`` of tuples:
+
+        ``missing``
+          The names of the dynamic segment markers in the route pattern
+          (including a trailing ``*remainder`` wildcard segment, if any)
+          for which no value was supplied.  The names are ordered by
+          their declaration in the route pattern.
+
+        ``unused``
+          The supplied names which do not correspond to any dynamic
+          segment marker in the route pattern.  The names are ordered by
+          their first occurrence in ``params``.
+
+        Neither tuple is ever ordered arbitrarily: the route pattern
+        declaration order and the input order, respectively, are
+        preserved.
+
+        A :exc:`KeyError` is raised if no route is registered under
+        ``route_name``.
+
+        For example, if a route named ``foobar`` has the pattern
+        ``/{foo}/{bar}/*traverse``::
+
+            request.check_route_params('foobar',
+                                       {'foo': '1'})
+            # => (('bar', 'traverse'), ())
+
+            request.check_route_params('foobar',
+                                       {'foo': '1',
+                                        'bar': '2',
+                                        'traverse': ('a', 'b'),
+                                        'extra': 'nope'})
+            # => ((), ('extra',))
+
+        Unlike :meth:`pyramid.request.Request.route_url`, this method
+        performs a purely static inspection: it does not generate a URL,
+        it does not call the route's :term:`pregenerator`, and it does
+        not execute any view code.  Special URL-generation options such
+        as ``_query`` or ``_anchor`` are not understood and will be
+        reported as ``unused`` when present.
+
+        .. versionadded:: 2.2
+        """
+        try:
+            reg = self.registry
+        except AttributeError:
+            reg = get_current_registry()  # b/c
+        mapper = reg.getUtility(IRoutesMapper)
+        route = mapper.get_route(route_name)
+
+        if route is None:
+            raise KeyError('No such route named %s' % route_name)
+
+        return _check_route_params(route.names, params)
 
     def resource_url(self, resource, *elements, **kw):
         """
@@ -802,6 +906,19 @@ def route_path(route_name, request, *elements, **kw):
     See :meth:`pyramid.request.Request.route_path` for more information.
     """
     return request.route_path(route_name, *elements, **kw)
+
+
+def check_route_params(route_name, request, params):
+    """
+    This is a backwards compatibility function.  Its result is the same as
+    calling::
+
+        request.check_route_params(route_name, params)
+
+    See :meth:`pyramid.request.Request.check_route_params` for more
+    information.
+    """
+    return request.check_route_params(route_name, params)
 
 
 def resource_url(resource, request, *elements, **kw):
