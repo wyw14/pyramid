@@ -219,6 +219,204 @@ class TestGetResponseFactory(unittest.TestCase):
         self.assertTrue(isinstance(response, Response))
 
 
+class DummyHeaderResponse:
+    def __init__(self, headerlist):
+        self.headerlist = list(headerlist)
+
+
+class TestGetOverBudgetHeaderIndexes(unittest.TestCase):
+    def _callFUT(self, *args, **kwargs):
+        from pyramid.response import get_over_budget_header_indexes
+
+        return get_over_budget_header_indexes(*args, **kwargs)
+
+    def test_empty_response(self):
+        response = DummyHeaderResponse([])
+        self.assertEqual(
+            self._callFUT(response, max_header_bytes=1, max_total_bytes=1),
+            [],
+        )
+
+    def test_empty_response_with_none_headerlist(self):
+        response = DummyHeaderResponse([])
+        response.headerlist = None
+        self.assertEqual(
+            self._callFUT(response, max_header_bytes=1, max_total_bytes=1),
+            [],
+        )
+
+    def test_empty_webob_response(self):
+        from pyramid.response import Response
+
+        response = Response()
+        response.headerlist = []
+        self.assertEqual(
+            self._callFUT(response, max_header_bytes=0, max_total_bytes=0),
+            [],
+        )
+
+    def test_empty_pairs_sequence(self):
+        self.assertEqual(
+            self._callFUT([], max_header_bytes=1, max_total_bytes=1),
+            [],
+        )
+
+    def test_within_budget(self):
+        # sizes: ('X-A','bb')=5, ('X-B','ccc')=6, ('X-C','dddd')=7
+        response = DummyHeaderResponse(
+            [('X-A', 'bb'), ('X-B', 'ccc'), ('X-C', 'dddd')]
+        )
+        self.assertEqual(
+            self._callFUT(response, max_header_bytes=7, max_total_bytes=18),
+            [],
+        )
+
+    def test_no_limits_means_nothing_is_over_budget(self):
+        response = DummyHeaderResponse([('X-A', 'z' * 5000)])
+        self.assertEqual(self._callFUT(response), [])
+        self.assertEqual(self._callFUT(response, max_header_bytes=None), [])
+
+    def test_per_header_limit_boundary_is_inclusive(self):
+        response = DummyHeaderResponse([('X-A', 'bb')])
+        self.assertEqual(self._callFUT(response, max_header_bytes=5), [])
+        response = DummyHeaderResponse([('X-A', 'bbb')])
+        self.assertEqual(self._callFUT(response, max_header_bytes=5), [0])
+
+    def test_per_header_limit_returns_indexes(self):
+        # sizes: 5, 6, 7
+        response = DummyHeaderResponse(
+            [('X-A', 'bb'), ('X-B', 'ccc'), ('X-C', 'dddd')]
+        )
+        self.assertEqual(self._callFUT(response, max_header_bytes=6), [2])
+        self.assertEqual(
+            self._callFUT(response, max_header_bytes=4), [0, 1, 2]
+        )
+
+    def test_total_limit_boundary_is_inclusive(self):
+        # running totals: 5, 11, 18
+        response = DummyHeaderResponse(
+            [('X-A', 'bb'), ('X-B', 'ccc'), ('X-C', 'dddd')]
+        )
+        self.assertEqual(self._callFUT(response, max_total_bytes=18), [])
+        self.assertEqual(self._callFUT(response, max_total_bytes=5), [1, 2])
+
+    def test_total_limit_flags_crossing_and_following_indexes(self):
+        # running totals: 5, 11, 18
+        response = DummyHeaderResponse(
+            [('X-A', 'bb'), ('X-B', 'ccc'), ('X-C', 'dddd')]
+        )
+        self.assertEqual(self._callFUT(response, max_total_bytes=10), [1, 2])
+
+    def test_duplicate_headers_counted_separately_in_order(self):
+        response = DummyHeaderResponse(
+            [
+                ('Set-Cookie', 'a=1'),
+                ('X-Mid', 'v'),
+                ('Set-Cookie', 'z' * 20),
+            ]
+        )
+        # sizes: 13 ('Set-Cookie'=10 + 3), 6, 10 + 20 = 30
+        self.assertEqual(self._callFUT(response, max_header_bytes=13), [2])
+        # running totals: 13, 19, 49
+        self.assertEqual(self._callFUT(response, max_total_bytes=19), [2])
+        self.assertEqual(self._callFUT(response, max_total_bytes=13), [1, 2])
+
+    def test_duplicate_headers_on_real_response_order(self):
+        from pyramid.response import Response
+
+        response = Response()
+        response.headerlist[:] = []
+        response.headerlist.append(('Set-Cookie', 'first=1'))
+        response.headerlist.append(('X-Other', 'x'))
+        response.headerlist.append(('Set-Cookie', 'second=' + '2' * 30))
+        result = self._callFUT(response, max_header_bytes=20)
+        # only the third header (index 2) is over the per-header budget
+        self.assertEqual(result, [2])
+
+    def test_non_ascii_value_counted_as_utf8_bytes(self):
+        # 'X-Tag' is 5 bytes, '\u4e2d\u6587' is 6 bytes in UTF-8 -> 11
+        response = DummyHeaderResponse([('X-Tag', '\u4e2d\u6587')])
+        self.assertEqual(self._callFUT(response, max_header_bytes=10), [0])
+        self.assertEqual(self._callFUT(response, max_header_bytes=11), [])
+
+    def test_non_ascii_name_counted_as_utf8_bytes(self):
+        # 'X-' is 2 bytes, '\u6807' is 3 bytes, value 'v' is 1 byte -> 6
+        response = DummyHeaderResponse([('X-\u6807', 'v')])
+        self.assertEqual(self._callFUT(response, max_header_bytes=5), [0])
+        self.assertEqual(self._callFUT(response, max_header_bytes=6), [])
+
+    def test_encoding_argument(self):
+        # 'caf\u00e9': 4 chars, 5 UTF-8 bytes but 4 latin-1 bytes
+        response = DummyHeaderResponse([('X-E', 'caf\u00e9')])
+        # name (3) + latin-1 value (4) = 7
+        self.assertEqual(
+            self._callFUT(response, max_header_bytes=7, encoding='latin-1'),
+            [],
+        )
+        # name (3) + utf-8 value (5) = 8
+        self.assertEqual(
+            self._callFUT(response, max_header_bytes=7, encoding='utf-8'),
+            [0],
+        )
+
+    def test_bytes_name_and_value_counted_raw(self):
+        # raw 0xff/0xfe cannot be decoded as utf-8; length must be 2
+        response = DummyHeaderResponse([(b'X-B', b'\xff\xfe')])
+        self.assertEqual(self._callFUT(response, max_header_bytes=5), [])
+        self.assertEqual(self._callFUT(response, max_header_bytes=4), [0])
+
+    def test_empty_name_and_value(self):
+        response = DummyHeaderResponse([('', '')])
+        self.assertEqual(self._callFUT(response, max_header_bytes=0), [])
+        response = DummyHeaderResponse([('X-Empty', '')])
+        # name only: 7 bytes
+        self.assertEqual(self._callFUT(response, max_header_bytes=6), [0])
+        self.assertEqual(self._callFUT(response, max_header_bytes=7), [])
+
+    def test_plain_pairs_tuple_input(self):
+        pairs = (('X-A', 'bb'), ('X-B', 'ccc'))
+        self.assertEqual(self._callFUT(pairs, max_header_bytes=5), [1])
+
+    def test_result_contains_only_integer_indexes(self):
+        response = DummyHeaderResponse(
+            [('X-A', 'bb'), ('X-B', 'ccc'), ('X-C', 'dddd')]
+        )
+        result = self._callFUT(
+            response, max_header_bytes=5, max_total_bytes=10
+        )
+        self.assertEqual(result, [1, 2])
+        self.assertTrue(all(isinstance(i, int) for i in result))
+
+    def test_response_is_not_modified(self):
+        from pyramid.response import Response
+
+        response = Response()
+        response.headerlist[:] = []
+        response.headerlist.append(('Set-Cookie', 'a=1'))
+        response.headerlist.append(('Set-Cookie', 'b=2'))
+        before = list(response.headerlist)
+        headerlist = response.headerlist
+        self._callFUT(response, max_header_bytes=1, max_total_bytes=1)
+        self.assertIs(response.headerlist, headerlist)
+        self.assertEqual(response.headerlist, before)
+        self.assertEqual(response.headers.getall('Set-Cookie'), ['a=1', 'b=2'])
+
+    def test_input_sequence_is_not_modified(self):
+        pairs = [('X-A', 'bb'), ('X-B', 'ccc')]
+        self._callFUT(pairs, max_header_bytes=4)
+        self.assertEqual(pairs, [('X-A', 'bb'), ('X-B', 'ccc')])
+
+    def test_alias(self):
+        from pyramid.response import check_header_byte_budget
+        from pyramid.response import get_over_budget_header_indexes
+
+        self.assertIs(check_header_byte_budget, get_over_budget_header_indexes)
+        response = DummyHeaderResponse([('X-A', 'z' * 10)])
+        self.assertEqual(
+            check_header_byte_budget(response, max_header_bytes=5), [0]
+        )
+
+
 class Dummy:
     pass
 

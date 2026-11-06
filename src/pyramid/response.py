@@ -14,6 +14,95 @@ class Response(_Response):
     pass
 
 
+def _encoded_header_part_size(value, encoding):
+    # Return the on-the-wire byte length of a header name or value.
+    # ``bytes`` are measured as-is; everything else is encoded using the
+    # caller-supplied codec (UTF-8 by default) so non-ASCII text is
+    # counted by its encoded byte length rather than its character count.
+    if isinstance(value, bytes):
+        return len(value)
+    return len(str(value).encode(encoding))
+
+
+def get_over_budget_header_indexes(
+    response,
+    max_header_bytes=None,
+    max_total_bytes=None,
+    encoding='utf-8',
+):
+    """
+    Check a response's headers against a caller-supplied byte budget.
+
+    The headers are inspected in the exact order in which they will be
+    sent, as given by ``response.headerlist``.  Each occurrence of a
+    repeated header field is therefore inspected as its own entry.  For
+    every header the encoded byte length of its field name and field
+    value is tallied; delimiter overhead such as ``": "`` or CRLF is not
+    included.
+
+    Two limits, both optional and both inclusive, may be supplied by the
+    caller:
+
+    ``max_header_bytes``
+        Per-header limit.  The index of a header is returned when the
+        combined encoded size of its name and value is greater than this
+        number.
+
+    ``max_total_bytes``
+        Overall limit.  Headers are summed in order, and the index of
+        every header at or after which the running total becomes greater
+        than this number is returned.
+
+    ``encoding``
+        The codec used to determine the byte length of non-ASCII header
+        names and values (UTF-8 by default).  ``bytes`` names or values
+        are always counted as-is.
+
+    A list of zero-based indexes (in ascending order) of the headers
+    that exceed either limit is returned.  Only indexes are returned:
+    header names and values are never copied into the result, and the
+    response itself is not modified in any way.  A response without
+    headers yields an empty list.
+
+    Any object exposing a ``headerlist`` sequence of ``(name, value)``
+    pairs is accepted, as is such a sequence passed directly.
+
+    .. code-block:: python
+        :linenos:
+
+        from pyramid.response import Response
+        from pyramid.response import get_over_budget_header_indexes
+
+        response = Response()
+        response.headerlist.append(('X-Trace', 'a' * 100))
+        over = get_over_budget_header_indexes(
+            response, max_header_bytes=80, max_total_bytes=8192
+        )
+
+    .. versionadded:: 2.2
+    """
+    headerlist = getattr(response, 'headerlist', response)
+    if not headerlist:
+        return []
+
+    over_budget_indexes = []
+    total_bytes = 0
+    for index, (name, value) in enumerate(headerlist):
+        header_bytes = _encoded_header_part_size(
+            name, encoding
+        ) + _encoded_header_part_size(value, encoding)
+        total_bytes += header_bytes
+        if (
+            max_header_bytes is not None and header_bytes > max_header_bytes
+        ) or (max_total_bytes is not None and total_bytes > max_total_bytes):
+            over_budget_indexes.append(index)
+    return over_budget_indexes
+
+
+# alternate public name for the header byte budget checker
+check_header_byte_budget = get_over_budget_header_indexes
+
+
 class FileResponse(Response):
     """
     A Response object that can be used to serve a static file from disk

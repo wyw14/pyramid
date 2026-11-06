@@ -19,3 +19,5 @@ Functions
 
 .. autofunction:: response_adapter
 
+.. autofunction:: get_over_budget_header_indexes
+
