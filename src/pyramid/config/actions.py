@@ -151,7 +151,12 @@ class ActionConfiguratorMixin:
             self.action_state.execute_actions(introspector=self.introspector)
         finally:
             self.end()
+        # carry over actions that were dropped because they were overridden
+        # by another action so reports generated after later commits can
+        # still see sources overridden during this configuration period
+        overridden_actions = self.action_state.overridden_actions
         self.action_state = ActionState()  # old actions have been processed
+        self.action_state.overridden_actions = overridden_actions
 
 
 # this class is licensed under the ZPL (stolen from Zope)
@@ -160,6 +165,10 @@ class ActionState:
         # NB "actions" is an API, dep'd upon by pyramid_zcml's load_zcml func
         self.actions = []
         self._seen_files = set()
+        # actions dropped because they were overridden by another action;
+        # retained across ``execute_actions`` calls so callers can report
+        # the overridden registration sources of a configuration period
+        self.overridden_actions = []
 
     def processSpec(self, spec):
         """Check whether a callable needs to be processed.  The ``spec``
@@ -322,6 +331,15 @@ class ActionState:
 
                 executed_actions.append(action)
 
+            # expose the actions that conflict resolution silently dropped
+            # because they were overridden, de-duplicating in case the same
+            # actions were re-examined during a re-entrant resolution pass
+            known = {id(action) for action in self.overridden_actions}
+            for action in conflict_state.overridden_actions:
+                if id(action) not in known:
+                    self.overridden_actions.append(action)
+                    known.add(id(action))
+
             self.actions = all_actions
             return executed_actions
 
@@ -346,6 +364,19 @@ class ConflictResolverState:
         # unique tracks the index of the action so we need it to increase
         # monotonically across invocations to resolveConflicts
         self.start = 0
+
+        # actions silently dropped because another action with a shorter
+        # (more outer) include path overrode them
+        self.overridden_actions = []
+        self._overridden_action_ids = set()
+
+    def add_overridden_action(self, action):
+        """Record an action that conflict resolution dropped because it was
+        overridden by an action registered at a shorter include path."""
+        marker = id(action)
+        if marker not in self._overridden_action_ids:
+            self._overridden_action_ids.add(marker)
+            self.overridden_actions.append(action)
 
 
 # this function is licensed under the ZPL (stolen from Zope)
@@ -464,6 +495,10 @@ def resolveConflicts(actions, state=None):
                 ):
                     L = conflicts.setdefault(discriminator, [baseinfo])
                     L.append(action['info'])
+                else:
+                    # the new action is dropped because the action resolved
+                    # in an earlier order/invocation overrides it
+                    state.add_overridden_action(action)
 
             else:
                 output.append(ainfo)
@@ -478,6 +513,10 @@ def resolveConflicts(actions, state=None):
                 ):
                     L = conflicts.setdefault(discriminator, [baseinfo])
                     L.append(action['info'])
+                else:
+                    # the action is not executed because the action with the
+                    # shortest include path overrides it
+                    state.add_overridden_action(action)
 
         if conflicts:
             raise ConfigurationConflictError(conflicts)

@@ -228,6 +228,47 @@ class ActionConfiguratorMixinTests(unittest.TestCase):
         registeredview = self._getViewCallable(config)
         self.assertEqual(registeredview.__name__, 'view3')
 
+    def test_commit_records_overridden_action(self):
+        config = self._makeOne()
+
+        def view1(request):  # pragma: no cover
+            pass
+
+        def view2(request):  # pragma: no cover
+            pass
+
+        def includeme(config):
+            config.add_view(view2)
+
+        config.add_view(view1)
+        config.include(includeme)
+        config.commit()
+        overridden = config.action_state.overridden_actions
+        self.assertEqual(len(overridden), 1)
+        self.assertEqual(
+            overridden[0]['includepath'],
+            ('%s:%s' % (__name__, 'includeme'),),
+        )
+
+    def test_commit_carries_overridden_actions_across_commits(self):
+        config = self._makeOne()
+
+        def view1(request):  # pragma: no cover
+            pass
+
+        def view2(request):  # pragma: no cover
+            pass
+
+        def includeme(config):
+            config.add_view(view2)
+
+        config.add_view(view1)
+        config.include(includeme)
+        config.commit()
+        # a later commit must not wipe the override trail
+        config.commit()
+        self.assertEqual(len(config.action_state.overridden_actions), 1)
+
     def test_autocommit_no_conflicts(self):
         from pyramid.renderers import null_renderer
 
@@ -1031,6 +1072,46 @@ class Test_resolveConflicts(unittest.TestCase):
             ]
         )
         self.assertRaises(ConfigurationConflictError, list, result)
+
+    def test_it_records_overridden_actions(self):
+        from pyramid.config.actions import (
+            ConflictResolverState,
+            resolveConflicts,
+        )
+        from . import dummyfactory as f
+
+        state = ConflictResolverState()
+        result = resolveConflicts(
+            [
+                (1, f, (1,), {}, (), 'local'),
+                (1, f, (2,), {}, ('x',), 'included'),
+            ],
+            state=state,
+        )
+        list(result)
+        self.assertEqual(len(state.overridden_actions), 1)
+        self.assertEqual(state.overridden_actions[0]['includepath'], ('x',))
+
+    def test_override_success_across_orders_records_action(self):
+        from pyramid.config.actions import (
+            ConflictResolverState,
+            resolveConflicts,
+        )
+        from . import dummyfactory as f
+
+        state = ConflictResolverState()
+        result = resolveConflicts(
+            [
+                (1, f, (2,), {}, ('x',), 'eek', 0),
+                (1, f, (3,), {}, ('x', 'y'), 'ack', 10),
+            ],
+            state=state,
+        )
+        list(result)
+        self.assertEqual(len(state.overridden_actions), 1)
+        self.assertEqual(
+            state.overridden_actions[0]['includepath'], ('x', 'y')
+        )
 
 
 class TestActionInfo(unittest.TestCase):
