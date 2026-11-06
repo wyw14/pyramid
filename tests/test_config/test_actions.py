@@ -289,6 +289,182 @@ class ActionConfiguratorMixinTests(unittest.TestCase):
         else:  # pragma: no cover
             raise AssertionError
 
+    def test_action_stats_empty(self):
+        config = self._makeOne()
+        self.assertEqual(config.action_stats(), [])
+
+    def test_action_stats_autocommit(self):
+        config = self._makeOne(autocommit=True)
+        executed = []
+        config.action('x', lambda: executed.append(True))
+        self.assertEqual(executed, [True])
+        self.assertEqual(config.action_stats(), [])
+
+    def test_action_stats_nested_include(self):
+        config = self._makeOne()
+
+        def inner_includeme(config):
+            config.action(('inner',), None)
+            config.action(('inner',), None)  # duplicate in nested source
+
+        def outer_includeme(config):
+            config.action(('outer',), None, order=5)
+            config.action(None)  # action without a discriminator
+            config.include(inner_includeme)
+
+        config.include(outer_includeme)
+        config.action(('top',), None)
+
+        outer_path = (outer_includeme.__module__ + ':outer_includeme',)
+        inner_path = outer_path + (
+            inner_includeme.__module__ + ':inner_includeme',
+        )
+
+        stats = config.action_stats()
+
+        # sources are sorted by include path, top-level configurator first
+        self.assertEqual(
+            [summary['includepath'] for summary in stats],
+            [(), outer_path, inner_path],
+        )
+        self.assertEqual(
+            stats[0],
+            {
+                'includepath': (),
+                'count': 1,
+                'with_discriminator': 1,
+                'without_discriminator': 0,
+                'orders': (0,),
+                'duplicate_discriminators': 0,
+            },
+        )
+        self.assertEqual(
+            stats[1],
+            {
+                'includepath': outer_path,
+                'count': 2,
+                'with_discriminator': 1,
+                'without_discriminator': 1,
+                'orders': (0, 5),
+                'duplicate_discriminators': 0,
+            },
+        )
+        self.assertEqual(
+            stats[2],
+            {
+                'includepath': inner_path,
+                'count': 2,
+                'with_discriminator': 2,
+                'without_discriminator': 0,
+                'orders': (0,),
+                'duplicate_discriminators': 1,
+            },
+        )
+
+    def test_action_stats_duplicate_discriminators_and_orders(self):
+        config = self._makeOne()
+        config.action('dup', None)
+        config.action('dup', None)
+        config.action('other', None, order=10)
+        config.action(None, None)
+        config.action(None, None, order=10)
+
+        stats = config.action_stats()
+        self.assertEqual(
+            stats,
+            [
+                {
+                    'includepath': (),
+                    'count': 5,
+                    'with_discriminator': 3,
+                    'without_discriminator': 2,
+                    'orders': (0, 10),
+                    'duplicate_discriminators': 1,
+                }
+            ],
+        )
+
+    def test_action_stats_same_discriminator_in_different_sources(self):
+        config = self._makeOne()
+
+        def included(config):
+            config.action('shared', None)
+
+        config.include(included)
+        config.action('shared', None)
+
+        stats = config.action_stats()
+        self.assertEqual(len(stats), 2)
+        for summary in stats:
+            self.assertEqual(summary['count'], 1)
+            self.assertEqual(summary['with_discriminator'], 1)
+            self.assertEqual(summary['without_discriminator'], 0)
+            self.assertEqual(summary['duplicate_discriminators'], 0)
+
+        # the include override still resolves cleanly at commit time
+        config.commit()
+        self.assertEqual(config.action_stats(), [])
+
+    def test_action_stats_does_not_execute_or_leak_values(self):
+        config = self._makeOne()
+        executed = []
+
+        def register(*args, **kw):
+            executed.append(True)
+
+        config.action(
+            ('secret',),
+            register,
+            args=('TOP-SECRET-VALUE',),
+            kw={'password': 'hunter2'},
+        )
+
+        stats = config.action_stats()
+
+        # no action was executed and the pending actions remain untouched
+        self.assertEqual(executed, [])
+        self.assertEqual(len(config.action_state.actions), 1)
+        self.assertEqual(len(stats), 1)
+        self.assertEqual(
+            set(stats[0]),
+            {
+                'includepath',
+                'count',
+                'with_discriminator',
+                'without_discriminator',
+                'orders',
+                'duplicate_discriminators',
+            },
+        )
+        rendered = repr(stats)
+        self.assertNotIn('TOP-SECRET-VALUE', rendered)
+        self.assertNotIn('hunter2', rendered)
+        self.assertNotIn('password', rendered)
+        self.assertNotIn('register', rendered)
+
+        # the action is still pending and runs when committed later
+        config.commit()
+        self.assertEqual(executed, [True])
+
+    def test_action_stats_cleared_after_commit(self):
+        config = self._makeOne()
+
+        def included(config):
+            config.action(('included',), None)
+
+        config.include(included)
+        config.action(None)
+        self.assertEqual(len(config.action_stats()), 2)
+
+        config.commit()
+        self.assertEqual(config.action_stats(), [])
+
+        # newly registered actions are aggregated independently
+        config.action(('after',), None)
+        post_commit = config.action_stats()
+        self.assertEqual(len(post_commit), 1)
+        self.assertEqual(post_commit[0]['count'], 1)
+
 
 class TestActionState(unittest.TestCase):
     def _makeOne(self):
@@ -446,6 +622,103 @@ class TestActionState(unittest.TestCase):
                 }
             ],
         )
+
+    def test_action_stats_empty(self):
+        c = self._makeOne()
+        self.assertEqual(c.action_stats(), [])
+
+    def test_action_stats_groups_by_includepath(self):
+        from . import dummyfactory as f
+
+        c = self._makeOne()
+        c.actions = [
+            (1, f, (), {'password': 'secret'}, (), None, 0),
+            (1, f, (), {}, ('a',), None, 0),
+            (1, f, (), {}, ('a',), None, 5),
+            (2, f, (), {}, ('a', 'b'), None, 5),
+            (None, None, (), {}, ('a',)),
+        ]
+
+        stats = c.action_stats()
+
+        self.assertEqual(
+            stats,
+            [
+                {
+                    'includepath': (),
+                    'count': 1,
+                    'with_discriminator': 1,
+                    'without_discriminator': 0,
+                    'orders': (0,),
+                    'duplicate_discriminators': 0,
+                },
+                {
+                    'includepath': ('a',),
+                    'count': 3,
+                    'with_discriminator': 2,
+                    'without_discriminator': 1,
+                    'orders': (0, 5),
+                    'duplicate_discriminators': 1,
+                },
+                {
+                    'includepath': ('a', 'b'),
+                    'count': 1,
+                    'with_discriminator': 1,
+                    'without_discriminator': 0,
+                    'orders': (5,),
+                    'duplicate_discriminators': 0,
+                },
+            ],
+        )
+        # configuration values and callables must not be exposed
+        rendered = repr(stats)
+        self.assertNotIn('secret', rendered)
+        self.assertNotIn('password', rendered)
+        self.assertNotIn('dummyfactory', rendered)
+        # statistics collection must be non-destructive
+        self.assertEqual(len(c.actions), 5)
+
+    def test_action_stats_does_not_resolve_deferred(self):
+        from pyramid.registry import Deferred
+
+        resolved = []
+
+        def discrim():
+            resolved.append(True)
+            return 1
+
+        c = self._makeOne()
+        c.action(Deferred(discrim))
+
+        stats = c.action_stats()
+        self.assertEqual(resolved, [])
+        self.assertEqual(
+            stats,
+            [
+                {
+                    'includepath': (),
+                    'count': 1,
+                    'with_discriminator': 1,
+                    'without_discriminator': 0,
+                    'orders': (0,),
+                    'duplicate_discriminators': 0,
+                }
+            ],
+        )
+
+    def test_action_stats_unhashable_discriminator(self):
+        c = self._makeOne()
+        c.actions = [
+            {'discriminator': ['unhashable'], 'includepath': (), 'order': 0},
+            {'discriminator': ['unhashable'], 'includepath': (), 'order': 0},
+        ]
+
+        stats = c.action_stats()
+        self.assertEqual(len(stats), 1)
+        self.assertEqual(stats[0]['count'], 2)
+        self.assertEqual(stats[0]['with_discriminator'], 2)
+        self.assertEqual(stats[0]['without_discriminator'], 0)
+        self.assertEqual(stats[0]['duplicate_discriminators'], 0)
 
     def test_processSpec(self):
         c = self._makeOne()

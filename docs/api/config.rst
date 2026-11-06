@@ -13,6 +13,7 @@
   :methodcategory:`Controlling Configuration State`
 
     .. automethod:: commit
+    .. automethod:: action_stats
     .. automethod:: begin
     .. automethod:: end
     .. automethod:: include

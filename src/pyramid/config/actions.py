@@ -1,3 +1,4 @@
+from collections import Counter
 import functools
 import itertools
 import operator
@@ -153,6 +154,54 @@ class ActionConfiguratorMixin:
             self.end()
         self.action_state = ActionState()  # old actions have been processed
 
+    def action_stats(self):
+        """Return statistics about the configuration actions that are
+        currently pending (not yet committed), aggregated by their
+        :meth:`pyramid.config.Configurator.include` source.
+
+        The result is a list of dictionaries sorted by include path, one
+        per distinct source.  Actions added directly to the configurator
+        are reported under the empty include path, which sorts first.
+        Each dictionary contains only structural metadata:
+
+        ``includepath``
+            The tuple of dotted include specs identifying the source of
+            the actions.  A nested include extends the path of its
+            parent include.
+
+        ``count``
+            The number of pending actions contributed by the source.
+
+        ``with_discriminator``
+            The number of pending actions that carry a discriminator.
+
+        ``without_discriminator``
+            The number of pending actions whose discriminator is
+            ``None`` (actions that can never conflict).
+
+        ``orders``
+            A sorted tuple of the distinct execution ``order`` values
+            used by the source's pending actions.
+
+        ``duplicate_discriminators``
+            The number of distinct discriminator values that occur more
+            than once among the source's pending actions.  Such
+            duplicates will conflict when the actions are committed
+            unless one of them is resolved through include path
+            overriding.
+
+        This method is purely introspective.  It never executes an
+        action, it does not resolve deferred discriminators, and it does
+        not expose action callables, arguments, keyword arguments or
+        introspectables, so calling it has no effect on configuration
+        state and cannot leak registered configuration values.  When
+        ``autocommit`` is ``True``, actions are executed immediately and
+        this method always returns an empty list.
+
+        .. versionadded:: 2.2
+        """
+        return self.action_state.action_stats()
+
 
 # this class is licensed under the ZPL (stolen from Zope)
 class ActionState:
@@ -205,6 +254,68 @@ class ActionState:
             )
         )
         self.actions.append(action)
+
+    def action_stats(self):
+        """Aggregate the pending actions by their include source without
+        executing them.
+
+        See :meth:`pyramid.config.Configurator.action_stats` for the
+        structure of the returned dictionaries.  Only structural
+        metadata is exposed; action callables and configuration values
+        are never touched or included.
+        """
+        groups = {}
+        for action in normalize_actions(self.actions):
+            includepath = action.get('includepath') or ()
+            group = groups.get(includepath)
+            if group is None:
+                group = {
+                    'count': 0,
+                    'with_discriminator': 0,
+                    'without_discriminator': 0,
+                    'orders': set(),
+                    'discriminators': Counter(),
+                }
+                groups[includepath] = group
+
+            group['count'] += 1
+            group['orders'].add(action.get('order') or 0)
+
+            # NB: discriminators are deliberately *not* deferred here;
+            # resolving a deferred discriminator may execute code and
+            # inspecting statistics must be side-effect free.
+            discriminator = action.get('discriminator')
+            if discriminator is None:
+                group['without_discriminator'] += 1
+            else:
+                group['with_discriminator'] += 1
+                try:
+                    group['discriminators'][discriminator] += 1
+                except TypeError:
+                    # an unhashable discriminator cannot participate in
+                    # duplicate detection; commit/conflict resolution
+                    # will surface it, statistics collection should not
+                    pass
+
+        stats = []
+        for includepath in sorted(groups):
+            group = groups[includepath]
+            duplicate_discriminators = sum(
+                1
+                for occurrences in group['discriminators'].values()
+                if occurrences > 1
+            )
+            stats.append(
+                {
+                    'includepath': includepath,
+                    'count': group['count'],
+                    'with_discriminator': group['with_discriminator'],
+                    'without_discriminator': group['without_discriminator'],
+                    'orders': tuple(sorted(group['orders'])),
+                    'duplicate_discriminators': duplicate_discriminators,
+                }
+            )
+        return stats
 
     def execute_actions(self, clear=True, introspector=None):
         """Execute the configuration actions
