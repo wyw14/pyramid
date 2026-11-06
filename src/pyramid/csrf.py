@@ -35,6 +35,12 @@ class LegacySessionCSRFStoragePolicy:
         """Sets a new CSRF token into the session and returns it."""
         return request.session.new_csrf_token()
 
+    def rotate_csrf_token(self, request):
+        """Invalidates the current CSRF token in the session and sets a new
+        one, returning it. If no token was previously set, a new one is
+        generated and returned."""
+        return request.session.new_csrf_token()
+
     def get_csrf_token(self, request):
         """Returns the currently active CSRF token from the session,
         generating a new one if needed."""
@@ -75,6 +81,14 @@ class SessionCSRFStoragePolicy:
         token = self._token_factory()
         request.session[self.key] = token
         return token
+
+    def rotate_csrf_token(self, request):
+        """Discards the CSRF token currently stored in the session, sets a
+        new one, and returns it. If no token was previously set, a new one
+        is generated and returned. The discarded token will no longer pass
+        ``check_csrf_token``."""
+        request.session.pop(self.key, None)
+        return self.new_csrf_token(request)
 
     def get_csrf_token(self, request):
         """Returns the currently active CSRF token from the session,
@@ -146,6 +160,15 @@ class CookieCSRFStoragePolicy:
         request.add_response_callback(set_cookie)
         return token
 
+    def rotate_csrf_token(self, request):
+        """Discards the CSRF cookie sent with the request, sets a new one,
+        and returns it. If no cookie was previously set, a new token is
+        generated and returned. The discarded token will no longer pass
+        ``check_csrf_token`` and a ``Set-Cookie`` header with the new token
+        is added to the response."""
+        request.cookies.pop(self.cookie_name, None)
+        return self.new_csrf_token(request)
+
     def get_csrf_token(self, request):
         """Returns the currently active CSRF token by checking the cookies
         sent with the current request."""
@@ -188,6 +211,34 @@ def new_csrf_token(request):
     registry = request.registry
     csrf = registry.getUtility(ICSRFStoragePolicy)
     return csrf.new_csrf_token(request)
+
+
+def rotate_csrf_token(request):
+    """Explicitly rotate the CSRF token for the request passed. The token
+    currently associated with the session (or cookie, depending on the
+    configured storage policy) is invalidated and a freshly generated token
+    is persisted and returned. If no token was previously set, a new one is
+    generated and returned.
+
+    After rotation, the previously issued token is rejected by
+    :func:`pyramid.csrf.check_csrf_token` on subsequent requests; callers
+    must use the returned, newly active token. Token validation itself
+    continues to use the configured
+    :class:`pyramid.interfaces.ICSRFStoragePolicy`, and the lazy token
+    creation performed by :func:`pyramid.csrf.get_csrf_token` is unchanged.
+
+    This is useful when the privileges tied to a session change, such as
+    immediately after a successful login.
+
+    """
+    registry = request.registry
+    csrf = registry.getUtility(ICSRFStoragePolicy)
+    rotate = getattr(csrf, 'rotate_csrf_token', None)
+    if rotate is None:
+        # Fall back for custom storage policies that do not implement
+        # rotate_csrf_token; issuing a new token replaces the old one.
+        return csrf.new_csrf_token(request)
+    return rotate(request)
 
 
 def check_csrf_token(

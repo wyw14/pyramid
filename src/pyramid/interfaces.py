@@ -1229,6 +1229,17 @@ class ICSRFStoragePolicy(Interface):
 
         """
 
+    def rotate_csrf_token(request):
+        """Invalidate the cross-site request forgery protection token
+        currently stored for the request, if any, and create, persist, and
+        return a new, random token. Unlike ``get_csrf_token``, this always
+        discards the existing token, so any previously issued token is
+        rejected by ``check_csrf_token`` after this call. If no token was
+        previously set, a new token is created and returned just like the
+        first call to ``get_csrf_token``.
+
+        """
+
     def get_csrf_token(request):
         """Return a cross-site request forgery protection token.  It
         will be an ascii-compatible unicode string.  If a token was previously

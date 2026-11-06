@@ -18,6 +18,8 @@
 
   .. autofunction:: new_csrf_token
 
+  .. autofunction:: rotate_csrf_token
+
   .. autofunction:: check_csrf_origin
 
   .. autofunction:: check_csrf_token

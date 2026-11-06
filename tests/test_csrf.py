@@ -16,6 +16,26 @@ class TestLegacySessionCSRFStoragePolicy(unittest.TestCase):
         def get_csrf_token(self):
             return self.current_token
 
+    class RotatableMockSession:
+        def __init__(self, current_token=None):
+            self.current_token = current_token
+            self._tokens = iter(
+                [
+                    'e5e9e30a08b34ff9842ff7d2b958c14b',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                ]
+            )
+
+        def new_csrf_token(self):
+            self.current_token = next(self._tokens)
+            return self.current_token
+
+        def get_csrf_token(self):
+            if self.current_token is None:
+                self.new_csrf_token()
+            return self.current_token
+
     def _makeOne(self):
         from pyramid.csrf import LegacySessionCSRFStoragePolicy
 
@@ -43,6 +63,44 @@ class TestLegacySessionCSRFStoragePolicy(unittest.TestCase):
         self.assertEqual(
             policy.new_csrf_token(request), 'e5e9e30a08b34ff9842ff7d2b958c14b'
         )
+
+    def test_rotate_csrf_token_delegates_to_session(self):
+        session = self.MockSession('foo')
+        request = DummyRequest(session=session)
+
+        policy = self._makeOne()
+        token = policy.rotate_csrf_token(request)
+
+        self.assertEqual(token, 'e5e9e30a08b34ff9842ff7d2b958c14b')
+        self.assertEqual(session.get_csrf_token(), token)
+        self.assertTrue(policy.check_csrf_token(request, token))
+        self.assertFalse(policy.check_csrf_token(request, 'foo'))
+
+    def test_rotate_csrf_token_first_time(self):
+        session = self.RotatableMockSession()
+        request = DummyRequest(session=session)
+
+        policy = self._makeOne()
+        token = policy.rotate_csrf_token(request)
+
+        self.assertEqual(token, 'e5e9e30a08b34ff9842ff7d2b958c14b')
+        self.assertEqual(policy.get_csrf_token(request), token)
+
+    def test_rotate_csrf_token_consecutive(self):
+        session = self.RotatableMockSession('old')
+        request = DummyRequest(session=session)
+
+        policy = self._makeOne()
+        first = policy.rotate_csrf_token(request)
+        second = policy.rotate_csrf_token(request)
+
+        self.assertEqual(first, 'e5e9e30a08b34ff9842ff7d2b958c14b')
+        self.assertEqual(second, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+        self.assertNotEqual(first, second)
+        self.assertEqual(session.get_csrf_token(), second)
+        self.assertTrue(policy.check_csrf_token(request, second))
+        self.assertFalse(policy.check_csrf_token(request, first))
+        self.assertFalse(policy.check_csrf_token(request, 'old'))
 
     def test_check_csrf_token(self):
         request = DummyRequest(session=self.MockSession('foo'))
@@ -93,6 +151,62 @@ class TestSessionCSRFStoragePolicy(unittest.TestCase):
         token = policy.new_csrf_token(request)
         self.assertNotEqual(token, 'foo')
         self.assertEqual(token, policy.get_csrf_token(request))
+
+    def test_rotate_csrf_token_first_time(self):
+        request = DummyRequest(session={})
+
+        policy = self._makeOne()
+        policy._token_factory = lambda: 'foo'
+        token = policy.rotate_csrf_token(request)
+
+        self.assertEqual(token, 'foo')
+        self.assertEqual(request.session['_csrft_'], 'foo')
+        self.assertEqual(policy.get_csrf_token(request), 'foo')
+
+    def test_rotate_csrf_token_consecutive(self):
+        request = DummyRequest(session={})
+
+        policy = self._makeOne()
+        tokens = iter(['foo', 'bar', 'baz'])
+        policy._token_factory = lambda: next(tokens)
+
+        first = policy.rotate_csrf_token(request)
+        second = policy.rotate_csrf_token(request)
+        third = policy.rotate_csrf_token(request)
+
+        self.assertEqual((first, second, third), ('foo', 'bar', 'baz'))
+        self.assertEqual(request.session['_csrft_'], 'baz')
+        self.assertEqual(policy.get_csrf_token(request), 'baz')
+
+    def test_rotate_csrf_token_rejects_old_token(self):
+        request = DummyRequest(session={})
+
+        policy = self._makeOne()
+        tokens = iter(['old', 'new'])
+        policy._token_factory = lambda: next(tokens)
+
+        old = policy.get_csrf_token(request)
+        new = policy.rotate_csrf_token(request)
+
+        self.assertEqual(old, 'old')
+        self.assertEqual(new, 'new')
+        self.assertNotEqual(old, new)
+        self.assertTrue(policy.check_csrf_token(request, new))
+        self.assertFalse(policy.check_csrf_token(request, old))
+
+    def test_rotate_csrf_token_persists_across_requests(self):
+        policy = self._makeOne()
+        tokens = iter(['old', 'new'])
+        policy._token_factory = lambda: next(tokens)
+        session = {}
+
+        old = policy.get_csrf_token(DummyRequest(session=session))
+        new = policy.rotate_csrf_token(DummyRequest(session=session))
+
+        later_request = DummyRequest(session=session)
+        self.assertEqual(policy.get_csrf_token(later_request), new)
+        self.assertTrue(policy.check_csrf_token(later_request, new))
+        self.assertFalse(policy.check_csrf_token(later_request, old))
 
     def test_check_csrf_token(self):
         request = DummyRequest(session={})
@@ -199,6 +313,65 @@ class TestCookieCSRFStoragePolicy(unittest.TestCase):
         self.assertNotEqual(token, 'foo')
         self.assertEqual(token, policy.get_csrf_token(request))
 
+    def test_rotate_csrf_token_with_no_existing_cookie_sets_cookie(self):
+        response = MockResponse()
+        request = DummyRequest()
+
+        policy = self._makeOne()
+        policy._token_factory = lambda: 'foo'
+        token = policy.rotate_csrf_token(request)
+
+        self.assertEqual(token, 'foo')
+        self.assertEqual(policy.get_csrf_token(request), 'foo')
+        request.response_callback(request, response)
+        self.assertEqual(
+            response.headerlist,
+            [('Set-Cookie', f'csrf_token={token}; Path=/; SameSite=Lax')],
+        )
+
+    def test_rotate_csrf_token_with_existing_cookie_replaces_it(self):
+        response = MockResponse()
+        request = DummyRequest()
+        request.cookies = {'csrf_token': 'old'}
+
+        policy = self._makeOne()
+        policy._token_factory = lambda: 'new'
+        token = policy.rotate_csrf_token(request)
+
+        self.assertEqual(token, 'new')
+        request.response_callback(request, response)
+        self.assertEqual(
+            response.headerlist,
+            [('Set-Cookie', 'csrf_token=new; Path=/; SameSite=Lax')],
+        )
+
+    def test_rotate_csrf_token_consecutive(self):
+        request = DummyRequest()
+        request.cookies = {'csrf_token': 'old'}
+
+        policy = self._makeOne()
+        tokens = iter(['first', 'second', 'third'])
+        policy._token_factory = lambda: next(tokens)
+
+        first = policy.rotate_csrf_token(request)
+        second = policy.rotate_csrf_token(request)
+        third = policy.rotate_csrf_token(request)
+
+        self.assertEqual((first, second, third), ('first', 'second', 'third'))
+        self.assertEqual(policy.get_csrf_token(request), 'third')
+
+    def test_rotate_csrf_token_rejects_old_token(self):
+        request = DummyRequest()
+        request.cookies = {'csrf_token': 'old'}
+
+        policy = self._makeOne()
+        policy._token_factory = lambda: 'new'
+        new = policy.rotate_csrf_token(request)
+
+        self.assertEqual(new, 'new')
+        self.assertTrue(policy.check_csrf_token(request, 'new'))
+        self.assertFalse(policy.check_csrf_token(request, 'old'))
+
     def test_check_csrf_token(self):
         request = DummyRequest()
 
@@ -260,6 +433,111 @@ class Test_new_csrf_token(unittest.TestCase):
         csrf_token = self._callFUT(request)
 
         self.assertEqual(csrf_token, 'e5e9e30a08b34ff9842ff7d2b958c14b')
+
+
+class Test_rotate_csrf_token(unittest.TestCase):
+    def setUp(self):
+        self.config = testing.setUp()
+
+    def tearDown(self):
+        testing.tearDown()
+
+    def _callFUT(self, *args, **kwargs):
+        from pyramid.csrf import rotate_csrf_token
+
+        return rotate_csrf_token(*args, **kwargs)
+
+    def test_no_override_csrf_utility_registered(self):
+        request = testing.DummyRequest()
+        csrf_token = self._callFUT(request)
+
+        self.assertEqual(csrf_token, request.session.get_csrf_token())
+
+    def test_first_rotation_with_no_existing_token(self):
+        from pyramid.csrf import SessionCSRFStoragePolicy
+
+        self.config.set_csrf_storage_policy(SessionCSRFStoragePolicy())
+        request = testing.DummyRequest()
+
+        csrf_token = self._callFUT(request)
+
+        self.assertEqual(csrf_token, request.session['_csrft_'])
+        self.assertEqual(csrf_token, request.session.get_csrf_token())
+
+    def test_success_delegates_to_policy_rotation(self):
+        self.config.set_csrf_storage_policy(DummyRotatingCSRF())
+        request = testing.DummyRequest()
+
+        csrf_token = self._callFUT(request)
+
+        self.assertEqual(csrf_token, 'rotated-token')
+
+    def test_falls_back_to_new_csrf_token_for_custom_policies(self):
+        self.config.set_csrf_storage_policy(DummyCSRF())
+        request = testing.DummyRequest()
+
+        csrf_token = self._callFUT(request)
+
+        self.assertEqual(csrf_token, 'e5e9e30a08b34ff9842ff7d2b958c14b')
+
+    def test_consecutive_rotations(self):
+        from pyramid.csrf import SessionCSRFStoragePolicy
+
+        policy = SessionCSRFStoragePolicy()
+        tokens = iter(['foo', 'bar', 'baz'])
+        policy._token_factory = lambda: next(tokens)
+        self.config.set_csrf_storage_policy(policy)
+
+        request = testing.DummyRequest()
+        first = self._callFUT(request)
+        second = self._callFUT(request)
+        third = self._callFUT(request)
+
+        self.assertEqual((first, second, third), ('foo', 'bar', 'baz'))
+        self.assertEqual(request.session['_csrft_'], 'baz')
+
+    def test_old_token_rejected_after_rotation(self):
+        from pyramid.csrf import (
+            SessionCSRFStoragePolicy,
+            check_csrf_token,
+            get_csrf_token,
+        )
+        from pyramid.exceptions import BadCSRFToken
+
+        self.config.set_csrf_storage_policy(SessionCSRFStoragePolicy())
+        # one session shared across requests, as a browser would present
+        session = testing.DummySession()
+
+        # first request: obtain a token
+        old = get_csrf_token(testing.DummyRequest(session=session))
+
+        # second request: explicitly rotate the token
+        new = self._callFUT(testing.DummyRequest(session=session))
+        self.assertNotEqual(old, new)
+
+        # subsequent requests: the old token is rejected, the new one passes
+        request = testing.DummyRequest(session=session)
+        request.headers['X-CSRF-Token'] = old
+        self.assertFalse(check_csrf_token(request, raises=False))
+        self.assertRaises(BadCSRFToken, check_csrf_token, request)
+
+        request = testing.DummyRequest(session=session)
+        request.headers['X-CSRF-Token'] = new
+        self.assertTrue(check_csrf_token(request, raises=False))
+
+    def test_default_generation_flow_unchanged(self):
+        from pyramid.csrf import get_csrf_token
+
+        self.config.set_csrf_storage_policy(DummyCSRF())
+        request = testing.DummyRequest()
+
+        # get_csrf_token must keep using the policy's lazy get, not rotate
+        self.assertEqual(
+            get_csrf_token(request), '02821185e4c94269bdc38e6eeae0a2f8'
+        )
+        self.assertEqual(
+            get_csrf_token(request), '02821185e4c94269bdc38e6eeae0a2f8'
+        )
 
 
 class Test_check_csrf_token(unittest.TestCase):
@@ -502,3 +780,8 @@ class DummyCSRF:
 
     def get_csrf_token(self, request):
         return '02821185e4c94269bdc38e6eeae0a2f8'
+
+
+class DummyRotatingCSRF(DummyCSRF):
+    def rotate_csrf_token(self, request):
+        return 'rotated-token'
